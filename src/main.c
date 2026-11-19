@@ -2,11 +2,16 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include "console/console.h"
 
 #define MAX_ROWS 2048
 #define MAX_COLS 300
 #define INPUT_SIZE 512
 #define TIMER_CURSOR 1
+#define WM_CONSOLE_OUTPUT (WM_APP + 1)
+
+typedef struct { DWORD length; char data[2048]; } ConsoleChunk;
 
 typedef struct {
     char ch;
@@ -26,6 +31,7 @@ static COLORREF currentColor = RGB(220, 220, 220);
 static COLORREF backgroundColor = RGB(15, 17, 20);
 static HWND mainWindow;
 static HFONT terminalFont;
+static ConsoleProcess *consoleProcess;
 
 static void UpdateScroll(void);
 static void InvalidateTerminal(void);
@@ -85,39 +91,34 @@ static void PrintPrompt(void) {
     UpdateScroll();
 }
 
-static void ExecuteCommand(void) {
+static void SendCommand(void) {
     input[inputLength] = '\0';
-
-    if (strcmp(input, "help") == 0) {
-        WriteLine("Comandos disponiveis:", RGB(100, 210, 130));
-        WriteLine("  help  - mostra esta ajuda", currentColor);
-        WriteLine("  clear - limpa a tela", currentColor);
-        WriteLine("  echo  - repete um texto", currentColor);
-        WriteLine("  color - muda a cor (ex: color blue)", currentColor);
-        WriteLine("  exit  - fecha o terminal", currentColor);
-    } else if (strcmp(input, "clear") == 0) {
-        ClearBuffer();
-    } else if (strncmp(input, "echo ", 5) == 0) {
-        WriteLine(input + 5, currentColor);
-    } else if (strcmp(input, "color blue") == 0) {
-        currentColor = RGB(100, 160, 255);
-    } else if (strcmp(input, "color green") == 0) {
-        currentColor = RGB(100, 220, 130);
-    } else if (strcmp(input, "color red") == 0) {
-        currentColor = RGB(255, 100, 100);
-    } else if (strcmp(input, "color white") == 0) {
-        currentColor = RGB(230, 230, 230);
-    } else if (strcmp(input, "exit") == 0) {
-        PostMessageA(mainWindow, WM_CLOSE, 0, 0);
-        return;
-    } else if (inputLength > 0) {
-        WriteText("Comando desconhecido: ", RGB(255, 110, 110));
-        WriteLine(input, currentColor);
+    if (consoleProcess) {
+        ConsoleWrite(consoleProcess, input, (DWORD)inputLength);
+        ConsoleWrite(consoleProcess, "\r\n", 2);
     }
+    inputLength = 0;
+    input[0] = '\0';
+    UpdateScroll();
+}
 
-    NewLine();
-    PrintPrompt();
-    InvalidateTerminal();
+static void OnConsoleOutput(const char *data, DWORD length, void *context) {
+    (void)context;
+    while (length > 0) {
+        DWORD chunkLength = length;
+        if (chunkLength > 2048) chunkLength = 2048;
+
+        ConsoleChunk *chunk = (ConsoleChunk *)malloc(sizeof(ConsoleChunk));
+        if (!chunk) return;
+        chunk->length = chunkLength;
+        memcpy(chunk->data, data, chunkLength);
+
+        if (!PostMessageA(mainWindow, WM_CONSOLE_OUTPUT, 0, (LPARAM)chunk))
+            free(chunk);
+
+        data += chunkLength;
+        length -= chunkLength;
+    }
 }
 
 static void UpdateScroll(void) {
@@ -210,7 +211,7 @@ static void ResizeTerminal(HWND hwnd) {
 static void ProcessCharacter(char ch) {
     if (ch == '\r' || ch == '\n') {
         NewLine();
-        ExecuteCommand();
+        SendCommand();
         return;
     }
 
@@ -237,6 +238,10 @@ static void ProcessCharacter(char ch) {
 
     if ((unsigned char)ch >= 32 && (unsigned char)ch < 127 &&
         inputLength < INPUT_SIZE - 1) {
+        if (inputLength == 0) {
+            inputStartRow = cursorRow;
+            inputStartCol = cursorCol;
+        }
         input[inputLength++] = ch;
         input[inputLength] = '\0';
         PutChar(ch, currentColor);
@@ -264,6 +269,17 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_CHAR:
         ProcessCharacter((char)wParam);
         return 0;
+
+    case WM_CONSOLE_OUTPUT: {
+        ConsoleChunk *chunk = (ConsoleChunk *)lParam;
+        if (chunk) {
+            for (DWORD i = 0; i < chunk->length; i++)
+                PutChar(chunk->data[i], currentColor);
+            free(chunk);
+            UpdateScroll();
+        }
+        return 0;
+    }
 
     case WM_KEYDOWN:
         if (wParam == VK_UP || wParam == VK_PRIOR) {
@@ -351,6 +367,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_CURSOR);
+        if (consoleProcess) {
+            ConsoleStop(consoleProcess);
+            consoleProcess = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -392,9 +412,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     SetFocus(mainWindow);
 
     ClearBuffer();
-    WriteLine("Native Terminal - prototipo Win32/GDI", RGB(100, 210, 140));
-    WriteLine("Digite 'help' para ver os comandos.", RGB(150, 160, 175));
-    PrintPrompt();
+    WriteLine("Native Terminal - CMD backend", RGB(100, 210, 140));
+    WriteLine("Conectando ao cmd.exe...", RGB(150, 160, 175));
+    consoleProcess = ConsoleStart(OnConsoleOutput, NULL);
+    if (!consoleProcess)
+        WriteLine("Falha ao iniciar cmd.exe.", RGB(255, 100, 100));
+    else
+        WriteLine("CMD conectado. Digite comandos abaixo.", RGB(100, 210, 140));
 
     MSG message;
     while (GetMessageA(&message, NULL, 0, 0) > 0) {
