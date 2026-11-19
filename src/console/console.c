@@ -23,6 +23,8 @@ static void EmitEvent(ConsoleProcess *console, ConsoleEventType type,
     event.data = data;
     event.length = length;
     event.exitCode = exitCode;
+    event.foreground = 0;
+    event.background = 0;
     console->onEvent(&event, console->context);
 }
 
@@ -147,6 +149,16 @@ BOOL ConsoleWrite(ConsoleProcess *console, const char *data, DWORD length) {
         totalWritten += written;
     }
     return TRUE;
+}
+
+void ConsoleSetColor(ConsoleProcess *console, COLORREF foreground, COLORREF background) {
+    ConsoleEvent event;
+    if (!console || !console->onEvent) return;
+    ZeroMemory(&event, sizeof(event));
+    event.type = CONSOLE_EVENT_SET_COLOR;
+    event.foreground = foreground;
+    event.background = background;
+    console->onEvent(&event, console->context);
 }
 
 void ConsoleStop(ConsoleProcess *console) {
