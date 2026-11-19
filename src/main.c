@@ -9,9 +9,14 @@
 #define MAX_COLS 300
 #define INPUT_SIZE 512
 #define TIMER_CURSOR 1
-#define WM_CONSOLE_OUTPUT (WM_APP + 1)
+#define WM_CONSOLE_EVENT (WM_APP + 1)
 
-typedef struct { DWORD length; char data[2048]; } ConsoleChunk;
+typedef struct {
+    ConsoleEventType type;
+    DWORD length;
+    DWORD exitCode;
+    char data[2048];
+} ConsoleMessage;
 
 typedef struct {
     char ch;
@@ -113,22 +118,36 @@ static void SendCommand(void) {
     UpdateScroll();
 }
 
-static void OnConsoleOutput(const char *data, DWORD length, void *context) {
+static void OnConsoleEvent(const ConsoleEvent *event, void *context) {
     (void)context;
-    while (length > 0) {
-        DWORD chunkLength = length;
-        if (chunkLength > 2048) chunkLength = 2048;
 
-        ConsoleChunk *chunk = (ConsoleChunk *)malloc(sizeof(ConsoleChunk));
-        if (!chunk) return;
-        chunk->length = chunkLength;
-        memcpy(chunk->data, data, chunkLength);
+    if (event->type == CONSOLE_EVENT_OUTPUT) {
+        DWORD offset = 0;
+        while (offset < event->length) {
+            DWORD chunkLength = event->length - offset;
+            if (chunkLength > 2048) chunkLength = 2048;
 
-        if (!PostMessageA(mainWindow, WM_CONSOLE_OUTPUT, 0, (LPARAM)chunk))
-            free(chunk);
+            ConsoleMessage *message = (ConsoleMessage *)calloc(1, sizeof(ConsoleMessage));
+            if (!message) return;
+            message->type = CONSOLE_EVENT_OUTPUT;
+            message->length = chunkLength;
+            memcpy(message->data, event->data + offset, chunkLength);
 
-        data += chunkLength;
-        length -= chunkLength;
+            if (!PostMessageA(mainWindow, WM_CONSOLE_EVENT, 0, (LPARAM)message))
+                free(message);
+            offset += chunkLength;
+        }
+        return;
+    }
+
+    {
+        ConsoleMessage *message = (ConsoleMessage *)calloc(1, sizeof(ConsoleMessage));
+        if (!message) return;
+        message->type = event->type;
+        message->exitCode = event->exitCode;
+
+        if (!PostMessageA(mainWindow, WM_CONSOLE_EVENT, 0, (LPARAM)message))
+            free(message);
     }
 }
 
@@ -281,17 +300,30 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         ProcessCharacter((char)wParam);
         return 0;
 
-    case WM_CONSOLE_OUTPUT: {
-        ConsoleChunk *chunk = (ConsoleChunk *)lParam;
-        if (chunk) {
-            for (DWORD i = 0; i < chunk->length; i++)
-                PutChar(chunk->data[i], currentColor);
-            free(chunk);
-            UpdateScroll();
+    case WM_CONSOLE_EVENT: {
+        ConsoleMessage *message = (ConsoleMessage *)lParam;
+        if (message) {
+            switch (message->type) {
+            case CONSOLE_EVENT_OUTPUT:
+                for (DWORD i = 0; i < message->length; i++)
+                    PutChar(message->data[i], currentColor);
+                UpdateScroll();
+                break;
+
+            case CONSOLE_EVENT_CLEAR_SCREEN:
+                ClearBuffer();
+                UpdateScroll();
+                break;
+
+            case CONSOLE_EVENT_EXIT:
+                free(message);
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            free(message);
         }
         return 0;
     }
-
     case WM_KEYDOWN:
         if (wParam == VK_UP || wParam == VK_PRIOR) {
             SCROLLINFO si = { sizeof(si), SIF_ALL };
@@ -425,7 +457,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     ClearBuffer();
     WriteLine("Native Terminal - CMD backend", RGB(100, 210, 140));
     WriteLine("Conectando ao cmd.exe...", RGB(150, 160, 175));
-    consoleProcess = ConsoleStart(OnConsoleOutput, NULL);
+    consoleProcess = ConsoleStart(OnConsoleEvent, NULL);
     if (!consoleProcess)
         WriteLine("Falha ao iniciar cmd.exe.", RGB(255, 100, 100));
     else
