@@ -33,3 +33,13 @@ Nesta primeira integração, o fluxo de texto funciona para comandos comuns. Apl
 
 - Windows 7 ou superior
 - MinGW GCC
+
+## Console event contract
+
+The console backend communicates with the terminal through `ConsoleEvent` callbacks:
+
+- `CONSOLE_EVENT_OUTPUT`: a byte range read from the child process output pipe.
+- `CONSOLE_EVENT_CLEAR_SCREEN`: a control event reserved for backends that can detect a screen-clear operation.
+- `CONSOLE_EVENT_EXIT`: emitted when the child process closes its output and terminates; includes its exit code.
+
+The terminal handles these events without needing to interpret CMD commands. When the CMD process exits (for example, after the user enters `exit`), the terminal closes its window. The current redirected-pipe backend can report process termination, but it cannot automatically detect CMD's internal screen-clear operation; `cls` is still handled locally as a compatibility workaround.
