@@ -50,12 +50,24 @@ static void NewLine(void) {
     EnsureRow(cursorRow);
 }
 
+static void ClearBuffer(void) {
+    memset(screenBuffer, 0, sizeof(screenBuffer));
+    usedRows = 1;
+    cursorRow = cursorCol = scrollTop = 0;
+    followOutput = 1;
+}
+
 static void PutChar(char ch, COLORREF color) {
     if (ch == '\r') return;
+    if (ch == '\f') {
+        ClearBuffer();
+        return;
+    }
     if (ch == '\n') {
         NewLine();
         return;
     }
+    if (ch == '\0') return;
     if (cursorCol >= columns) NewLine();
     EnsureRow(cursorRow);
     screenBuffer[cursorRow][cursorCol].ch = ch;
@@ -74,13 +86,6 @@ static void WriteLine(const char *text, COLORREF color) {
     UpdateScroll();
 }
 
-static void ClearBuffer(void) {
-    memset(screenBuffer, 0, sizeof(screenBuffer));
-    usedRows = 1;
-    cursorRow = cursorCol = scrollTop = 0;
-    followOutput = 1;
-}
-
 static void PrintPrompt(void) {
     WriteText(">", RGB(90, 190, 255));
     WriteText(" ", currentColor);
@@ -93,6 +98,12 @@ static void PrintPrompt(void) {
 
 static void SendCommand(void) {
     input[inputLength] = '\0';
+
+    /* CLS limpa a tela do nosso terminal, não apenas a saída redirecionada do CMD. */
+    if (_stricmp(input, "cls") == 0) {
+        ClearBuffer();
+    }
+
     if (consoleProcess) {
         ConsoleWrite(consoleProcess, input, (DWORD)inputLength);
         ConsoleWrite(consoleProcess, "\r\n", 2);
