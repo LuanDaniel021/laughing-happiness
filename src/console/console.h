@@ -3,12 +3,25 @@
 
 #include <windows.h>
 
-typedef void (*ConsoleOutputCallback)(const char *data, DWORD length, void *context);
+typedef enum {
+    CONSOLE_EVENT_OUTPUT,
+    CONSOLE_EVENT_CLEAR_SCREEN,
+    CONSOLE_EVENT_EXIT
+} ConsoleEventType;
+
+typedef struct {
+    ConsoleEventType type;
+    const char *data;
+    DWORD length;
+    DWORD exitCode;
+} ConsoleEvent;
+
+typedef void (*ConsoleEventCallback)(const ConsoleEvent *event, void *context);
 
 typedef struct ConsoleProcess ConsoleProcess;
 
-/* Starts cmd.exe with redirected standard input/output. */
-ConsoleProcess *ConsoleStart(ConsoleOutputCallback onOutput, void *context);
+/* Starts cmd.exe and reports output/control events through one callback. */
+ConsoleProcess *ConsoleStart(ConsoleEventCallback onEvent, void *context);
 
 /* Writes bytes to the interpreter's standard input. */
 BOOL ConsoleWrite(ConsoleProcess *console, const char *data, DWORD length);
