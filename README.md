@@ -40,6 +40,14 @@ The console backend communicates with the terminal through `ConsoleEvent` callba
 
 - `CONSOLE_EVENT_OUTPUT`: a byte range read from the child process output pipe.
 - `CONSOLE_EVENT_CLEAR_SCREEN`: a control event reserved for backends that can detect a screen-clear operation.
+- `CONSOLE_EVENT_SET_COLOR`: changes the terminal foreground and background colors.
 - `CONSOLE_EVENT_EXIT`: emitted when the child process closes its output and terminates; includes its exit code.
 
 The terminal handles these events without needing to interpret CMD commands. When the CMD process exits (for example, after the user enters `exit`), the terminal closes its window. The current redirected-pipe backend can report process termination, but it cannot automatically detect CMD's internal screen-clear operation; `cls` is still handled locally as a compatibility workaround.
+
+
+## Cores
+
+O terminal interpreta sequências ANSI SGR de cor na saída dos programas, incluindo cores normais (por exemplo, `ESC[32m`), cores brilhantes (`ESC[91m`) e restauração (`ESC[0m`). O parser mantém o estado entre blocos de leitura, inclusive quando uma sequência chega dividida.
+
+Como o CMD está conectado por pipes e não possui um console real, o builtin `color` é reconhecido pelo terminal e convertido em `CONSOLE_EVENT_SET_COLOR`. A sintaxe `color 0A` segue o padrão do CMD: primeiro dígito para fundo e segundo para texto. `color` sem argumentos restaura as cores padrão. Outros comandos continuam sendo enviados ao CMD.
