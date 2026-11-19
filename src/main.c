@@ -15,6 +15,8 @@ typedef struct {
     ConsoleEventType type;
     DWORD length;
     DWORD exitCode;
+    COLORREF foreground;
+    COLORREF background;
     char data[2048];
 } ConsoleMessage;
 
@@ -32,8 +34,13 @@ static int cellWidth = 9, cellHeight = 18;
 static int inputStartRow = 0, inputStartCol = 0;
 static char input[INPUT_SIZE];
 static int inputLength = 0;
+static const COLORREF defaultForeground = RGB(220, 220, 220);
+static const COLORREF defaultBackground = RGB(15, 17, 20);
 static COLORREF currentColor = RGB(220, 220, 220);
 static COLORREF backgroundColor = RGB(15, 17, 20);
+static int ansiState = 0;
+static char ansiParameters[64];
+static int ansiParameterLength = 0;
 static HWND mainWindow;
 static HFONT terminalFont;
 static ConsoleProcess *consoleProcess;
@@ -101,15 +108,138 @@ static void PrintPrompt(void) {
     UpdateScroll();
 }
 
+
+static int HexDigit(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    return -1;
+}
+
+static COLORREF CmdColor(int value) {
+    static const COLORREF colors[16] = {
+        RGB(0,0,0), RGB(0,0,128), RGB(0,128,0), RGB(0,128,128),
+        RGB(128,0,0), RGB(128,0,128), RGB(128,128,0), RGB(192,192,192),
+        RGB(128,128,128), RGB(0,0,255), RGB(0,255,0), RGB(0,255,255),
+        RGB(255,0,0), RGB(255,0,255), RGB(255,255,0), RGB(255,255,255)
+    };
+    return colors[value & 15];
+}
+
+/* CMD color is emulated because redirected CMD has no console attributes. */
+static BOOL TryHandleColorCommand(const char *command) {
+    const char *arg = command;
+    int background, foreground;
+
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (_strnicmp(arg, "color", 5) != 0) return FALSE;
+    arg += 5;
+    if (*arg && *arg != ' ' && *arg != '\t') return FALSE;
+    while (*arg == ' ' || *arg == '\t') arg++;
+
+    if (!*arg) {
+        ConsoleSetColor(consoleProcess, defaultForeground, defaultBackground);
+        return TRUE;
+    }
+
+    if (arg[0] == '/' || !arg[0] || !arg[1] || arg[2]) return FALSE;
+    background = HexDigit(arg[0]);
+    foreground = HexDigit(arg[1]);
+    if (background < 0 || foreground < 0 || background == foreground)
+        return FALSE;
+
+    ConsoleSetColor(consoleProcess, CmdColor(foreground), CmdColor(background));
+    return TRUE;
+}
+
+static COLORREF AnsiColor(int index) {
+    static const COLORREF colors[16] = {
+        RGB(0,0,0), RGB(170,0,0), RGB(0,170,0), RGB(170,85,0),
+        RGB(0,0,170), RGB(170,0,170), RGB(0,170,170), RGB(170,170,170),
+        RGB(85,85,85), RGB(255,85,85), RGB(85,255,85), RGB(255,255,85),
+        RGB(85,85,255), RGB(255,85,255), RGB(85,255,255), RGB(255,255,255)
+    };
+    return colors[index & 15];
+}
+
+static void ApplyAnsiSgr(void) {
+    int values[16], count = 0;
+    char *cursor = ansiParameters;
+
+    if (!*cursor) values[count++] = 0;
+    while (*cursor && count < 16) {
+        char *end;
+        long value = strtol(cursor, &end, 10);
+        if (end == cursor) break;
+        values[count++] = (int)value;
+        cursor = end;
+        if (*cursor == ';') cursor++;
+        else if (*cursor) break;
+    }
+
+    for (int i = 0; i < count; i++) {
+        int value = values[i];
+        if (value == 0) {
+            currentColor = defaultForeground;
+            backgroundColor = defaultBackground;
+        } else if (value >= 30 && value <= 37) currentColor = AnsiColor(value - 30);
+        else if (value >= 90 && value <= 97) currentColor = AnsiColor(value - 90 + 8);
+        else if (value == 39) currentColor = defaultForeground;
+        else if (value >= 40 && value <= 47) backgroundColor = AnsiColor(value - 40);
+        else if (value >= 100 && value <= 107) backgroundColor = AnsiColor(value - 100 + 8);
+        else if (value == 49) backgroundColor = defaultBackground;
+    }
+}
+
+static void HandleOutputByte(unsigned char ch) {
+    if (ansiState == 0) {
+        if (ch == 0x1B) { ansiState = 1; return; }
+        PutChar((char)ch, currentColor);
+        return;
+    }
+
+    if (ansiState == 1) {
+        if (ch == '[') {
+            ansiState = 2;
+            ansiParameterLength = 0;
+            ansiParameters[0] = '\0';
+        } else {
+            ansiState = 0;
+            PutChar((char)ch, currentColor);
+        }
+        return;
+    }
+
+    if (ch >= 0x40 && ch <= 0x7E) {
+        ansiParameters[ansiParameterLength] = '\0';
+        if (ch == 'm') ApplyAnsiSgr();
+        else if (ch == 'J' && strcmp(ansiParameters, "2") == 0) ClearBuffer();
+        ansiState = 0;
+        ansiParameterLength = 0;
+        return;
+    }
+
+    if (ansiParameterLength < (int)sizeof(ansiParameters) - 1)
+        ansiParameters[ansiParameterLength++] = (char)ch;
+    else {
+        ansiState = 0;
+        ansiParameterLength = 0;
+    }
+}
+
 static void SendCommand(void) {
     input[inputLength] = '\0';
 
-    /* CLS limpa a tela do nosso terminal, não apenas a saída redirecionada do CMD. */
+    /* CMD console attributes are emulated by the terminal when using pipes. */
     if (_stricmp(input, "cls") == 0) {
         ClearBuffer();
-    }
-
-    if (consoleProcess) {
+        if (consoleProcess) {
+            ConsoleWrite(consoleProcess, input, (DWORD)inputLength);
+            ConsoleWrite(consoleProcess, "\r\n", 2);
+        }
+    } else if (TryHandleColorCommand(input)) {
+        /* Translated into CONSOLE_EVENT_SET_COLOR. */
+    } else if (consoleProcess) {
         ConsoleWrite(consoleProcess, input, (DWORD)inputLength);
         ConsoleWrite(consoleProcess, "\r\n", 2);
     }
@@ -145,6 +275,8 @@ static void OnConsoleEvent(const ConsoleEvent *event, void *context) {
         if (!message) return;
         message->type = event->type;
         message->exitCode = event->exitCode;
+        message->foreground = event->foreground;
+        message->background = event->background;
 
         if (!PostMessageA(mainWindow, WM_CONSOLE_EVENT, 0, (LPARAM)message))
             free(message);
@@ -306,12 +438,18 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             switch (message->type) {
             case CONSOLE_EVENT_OUTPUT:
                 for (DWORD i = 0; i < message->length; i++)
-                    PutChar(message->data[i], currentColor);
+                    HandleOutputByte((unsigned char)message->data[i]);
                 UpdateScroll();
                 break;
 
             case CONSOLE_EVENT_CLEAR_SCREEN:
                 ClearBuffer();
+                UpdateScroll();
+                break;
+
+            case CONSOLE_EVENT_SET_COLOR:
+                currentColor = message->foreground;
+                backgroundColor = message->background;
                 UpdateScroll();
                 break;
 
