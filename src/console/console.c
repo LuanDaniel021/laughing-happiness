@@ -10,9 +10,21 @@ struct ConsoleProcess {
     HANDLE inputWrite;
     HANDLE outputRead;
     HANDLE readerThread;
-    ConsoleOutputCallback onOutput;
+    ConsoleEventCallback onEvent;
     void *context;
 };
+
+static void EmitEvent(ConsoleProcess *console, ConsoleEventType type,
+                      const char *data, DWORD length, DWORD exitCode) {
+    ConsoleEvent event;
+    if (!console->onEvent) return;
+
+    event.type = type;
+    event.data = data;
+    event.length = length;
+    event.exitCode = exitCode;
+    console->onEvent(&event, console->context);
+}
 
 static DWORD WINAPI ConsoleReader(LPVOID parameter) {
     ConsoleProcess *console = (ConsoleProcess *)parameter;
@@ -21,13 +33,20 @@ static DWORD WINAPI ConsoleReader(LPVOID parameter) {
 
     while (ReadFile(console->outputRead, buffer, sizeof(buffer), &bytesRead, NULL) &&
            bytesRead > 0) {
-        if (console->onOutput)
-            console->onOutput(buffer, bytesRead, console->context);
+        EmitEvent(console, CONSOLE_EVENT_OUTPUT, buffer, bytesRead, 0);
+    }
+
+    /* EOF means the child closed its output pipe; report process termination. */
+    WaitForSingleObject(console->process, INFINITE);
+    {
+        DWORD exitCode = 0;
+        GetExitCodeProcess(console->process, &exitCode);
+        EmitEvent(console, CONSOLE_EVENT_EXIT, NULL, 0, exitCode);
     }
     return 0;
 }
 
-ConsoleProcess *ConsoleStart(ConsoleOutputCallback onOutput, void *context) {
+ConsoleProcess *ConsoleStart(ConsoleEventCallback onEvent, void *context) {
     SECURITY_ATTRIBUTES security;
     STARTUPINFOA startup;
     PROCESS_INFORMATION processInfo;
@@ -90,12 +109,18 @@ ConsoleProcess *ConsoleStart(ConsoleOutputCallback onOutput, void *context) {
     console->thread = processInfo.hThread;
     console->inputWrite = parentInputWrite;
     console->outputRead = parentOutputRead;
-    console->onOutput = onOutput;
+    console->onEvent = onEvent;
     console->context = context;
 
     console->readerThread = CreateThread(NULL, 0, ConsoleReader, console, 0, NULL);
     if (!console->readerThread) {
-        ConsoleStop(console);
+        TerminateProcess(console->process, 1);
+        WaitForSingleObject(console->process, INFINITE);
+        CloseHandle(console->inputWrite);
+        CloseHandle(console->outputRead);
+        CloseHandle(console->thread);
+        CloseHandle(console->process);
+        free(console);
         return NULL;
     }
 
@@ -132,16 +157,13 @@ void ConsoleStop(ConsoleProcess *console) {
         console->inputWrite = NULL;
     }
 
-    if (console->process) {
-        DWORD waitResult = WaitForSingleObject(console->process, 1000);
-        if (waitResult == WAIT_TIMEOUT) {
-            TerminateProcess(console->process, 0);
-            WaitForSingleObject(console->process, 1000);
-        }
+    if (console->process && WaitForSingleObject(console->process, 1000) == WAIT_TIMEOUT) {
+        TerminateProcess(console->process, 0);
+        WaitForSingleObject(console->process, INFINITE);
     }
 
     if (console->readerThread) {
-        WaitForSingleObject(console->readerThread, 1500);
+        WaitForSingleObject(console->readerThread, INFINITE);
         CloseHandle(console->readerThread);
     }
 
